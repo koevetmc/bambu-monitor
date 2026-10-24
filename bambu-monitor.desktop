@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Bambu Monitor
+Comment=System tray monitor for Bambu Lab printer
+Exec=/home/koevet/bambu-monitor/.venv/bin/python /home/koevet/bambu-monitor/tray.py
+Icon=printer
+Categories=Utility;
+Terminal=false

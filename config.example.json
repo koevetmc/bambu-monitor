@@ -1,0 +1,6 @@
+{
+  "printer_ip": "auto",
+  "access_code": "",
+  "milestones": [25, 50, 75],
+  "notifications": true
+}
