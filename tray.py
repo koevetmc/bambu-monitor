@@ -33,10 +33,16 @@ def make_icon(state: PrinterState):
     return img
 
 
-def build_menu(state: PrinterState):
+def build_menu(state: PrinterState, mon: PrinterMonitor):
     def st(fn):
         # text callable tolerant of whatever pystray passes it
         return pystray.MenuItem(lambda *a: fn(), None, enabled=False)
+
+    def act(fn):
+        return lambda icon, item: fn()
+
+    running = lambda *a: state.gcode_state == "RUNNING"
+    paused = lambda *a: state.gcode_state == "PAUSE"
 
     return pystray.Menu(
         st(lambda: f"State: {state.gcode_state.title()}"),
@@ -44,6 +50,22 @@ def build_menu(state: PrinterState):
         st(lambda: f"Progress: {state.percent}%  ·  layer {state.layer}/{state.total_layers}"),
         st(lambda: f"ETA: ~{state.remaining_min} min  ·  "
                    f"Nozzle {state.nozzle:.0f}°C  Bed {state.bed:.0f}°C"),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Pause", act(mon.pause), enabled=running),
+        pystray.MenuItem("Resume", act(mon.resume), enabled=paused),
+        pystray.MenuItem("Stop", pystray.Menu(
+            pystray.MenuItem("Confirm stop", act(mon.stop)),
+        ), enabled=lambda *a: state.gcode_state in ("RUNNING", "PAUSE")),
+        pystray.MenuItem("Speed", pystray.Menu(
+            pystray.MenuItem("Silent", act(lambda: mon.set_speed(1))),
+            pystray.MenuItem("Standard", act(lambda: mon.set_speed(2))),
+            pystray.MenuItem("Sport", act(lambda: mon.set_speed(3))),
+            pystray.MenuItem("Ludicrous", act(lambda: mon.set_speed(4))),
+        )),
+        pystray.MenuItem("Chamber light", pystray.Menu(
+            pystray.MenuItem("On", act(lambda: mon.light(True))),
+            pystray.MenuItem("Off", act(lambda: mon.light(False))),
+        )),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", lambda icon, item: icon.stop()),
     )
@@ -76,10 +98,11 @@ def main():
         sys.exit("Missing access_code in config.json — printer Settings → Network/LAN.")
 
     state = PrinterState()
-    PrinterMonitor(cfg, state).run()
+    mon = PrinterMonitor(cfg, state)
+    mon.run()
 
     icon = pystray.Icon("bambu-monitor", make_icon(state), "Bambu Monitor",
-                      build_menu(state))
+                      build_menu(state, mon))
     threading.Thread(target=refresh_loop, args=(icon, state), daemon=True).start()
     icon.run()
 

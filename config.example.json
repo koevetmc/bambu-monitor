@@ -2,5 +2,8 @@
   "printer_ip": "auto",
   "access_code": "",
   "milestones": [25, 50, 75],
-  "notifications": true
+  "notifications": true,
+  "notify_phone": true,
+  "kdeconnect_device": "auto",
+  "camera_snapshots": true
 }

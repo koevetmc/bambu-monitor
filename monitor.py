@@ -8,8 +8,12 @@ from dataclasses import dataclass, field
 
 import paho.mqtt.client as mqtt
 
+import camera
+import kde
+
 MQTT_PORT = 8883
 USER = "bblp"
+SNAP_PATH = "/tmp/bambu-frame.jpg"
 
 
 @dataclass
@@ -36,11 +40,12 @@ class PrinterState:
             return self.gcode_state.title()
 
 
-def notify(title, body="", urgency="normal"):
-    subprocess.run(
-        ["notify-send", "-a", "Bambu Monitor", "-u", urgency, title, body],
-        check=False,
-    )
+def notify(title, body="", urgency="normal", image=None):
+    cmd = ["notify-send", "-a", "Bambu Monitor", "-u", urgency]
+    if image:
+        cmd += ["-i", image]
+    cmd += [title, body]
+    subprocess.run(cmd, check=False)
 
 
 class PrinterMonitor:
@@ -62,6 +67,40 @@ class PrinterMonitor:
     def run(self):
         self.client.connect_async(self.cfg["printer_ip"], MQTT_PORT, keepalive=30)
         self.client.loop_start()
+
+    # ---- printer control (device/<serial>/request) ----
+
+    def send_command(self, payload):
+        with self.state.lock:
+            serial = self.state.serial
+        if not serial:
+            return False
+        payload.setdefault("sequence_id", "0")
+        topic = f"device/{serial}/request"
+        root = "system" if payload.get("command") == "ledctrl" else "print"
+        self.client.publish(topic, json.dumps({root: payload}))
+        return True
+
+    def pause(self):
+        return self.send_command({"command": "pause"})
+
+    def resume(self):
+        return self.send_command({"command": "resume"})
+
+    def stop(self):
+        return self.send_command({"command": "stop"})
+
+    def set_speed(self, level):
+        # 1 silent, 2 standard, 3 sport, 4 ludicrous
+        return self.send_command({"command": "print_speed", "param": str(level)})
+
+    def light(self, on):
+        return self.send_command({
+            "command": "ledctrl", "led_node": "chamber_light",
+            "led_mode": "on" if on else "off",
+            "led_on_time": 500, "led_off_time": 500,
+            "loop_times": 0, "interval_time": 0,
+        })
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         if reason_code == 0:
@@ -110,27 +149,47 @@ class PrinterMonitor:
                 events = self._transition(prev, new_state)
             events += self._milestones()
 
-        for title, body, urgency in events:
-            if self.cfg.get("notifications", True):
+        for title, body, urgency, snap, phone in events:
+            self._dispatch(title, body, urgency, snap, phone)
+
+    def _dispatch(self, title, body, urgency, snapshot, phone):
+        if self.cfg.get("notifications", True):
+            if snapshot and self.cfg.get("camera_snapshots", True):
+                threading.Thread(target=self._notify_with_snap,
+                                 args=(title, body, urgency), daemon=True).start()
+            else:
                 notify(title, body, urgency)
+        if phone and self.cfg.get("notify_phone", True):
+            kde.ping(f"{title} — {body}" if body else title,
+                     self.cfg.get("kdeconnect_device"))
+
+    def _notify_with_snap(self, title, body, urgency):
+        ok = camera.grab_frame(self.cfg["printer_ip"], self.cfg["access_code"],
+                               SNAP_PATH)
+        notify(title, body, urgency, image=SNAP_PATH if ok else None)
 
     def _transition(self, prev, new):
+        """Return events as (title, body, urgency, snapshot, phone)."""
         s = self.state
         fname = s.file.split("/")[-1].rsplit(".", 1)[0] or "print"
         if new == "RUNNING" and prev in ("IDLE", "PREPARE", "OFFLINE", "PAUSE"):
             s.start_time = s.start_time or time.time()
             s.fired_milestones = set()
             if prev != "PAUSE":
-                return [("Print started", f"{fname}", "normal")]
-            return [("Print resumed", f"{fname} — {s.percent}%", "normal")]
+                return [("Print started", fname, "normal", False, False)]
+            return [("Print resumed", f"{fname} — {s.percent}%", "normal",
+                     False, False)]
         if new == "FINISH":
             dur = int((time.time() - s.start_time) / 60) if s.start_time else 0
             s.start_time = 0
-            return [("Print finished", f"{fname} ({dur} min)" if dur else fname, "normal")]
+            return [("Print finished", f"{fname} ({dur} min)" if dur else fname,
+                     "normal", True, True)]
         if new == "FAILED":
-            return [("Print FAILED", f"{fname} at {s.percent}%", "critical")]
+            return [("Print FAILED", f"{fname} at {s.percent}%", "critical",
+                     True, True)]
         if new == "PAUSE":
-            return [("Print paused", f"{fname} — {s.percent}%", "normal")]
+            return [("Print paused", f"{fname} — {s.percent}%", "normal",
+                     False, True)]
         if new == "IDLE":
             s.start_time = 0
             s.percent = 0
@@ -144,5 +203,6 @@ class PrinterMonitor:
         for m in self.cfg.get("milestones", [25, 50, 75]):
             if s.percent >= m and m not in s.fired_milestones:
                 s.fired_milestones.add(m)
-                out.append((f"Print {m}%", f"~{s.remaining_min} min left", "low"))
+                out.append((f"Print {m}%", f"~{s.remaining_min} min left",
+                            "low", False, False))
         return out
